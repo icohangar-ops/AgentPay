@@ -33,30 +33,36 @@ model Service {
 }
 
 model Agent {
-  id        String   @id @default(cuid())
-  name      String
-  role      String
-  balance   Float    @default(0)
-  publicKey String   @default("")
-  status    String   @default("active")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String   @id @default(cuid())
+  name           String
+  role           String
+  balance        Float    @default(0)
+  publicKey      String   @default("")
+  privateKey     String   @default("") // Encrypted Ed25519 private key (hex, testnet only)
+  onChainBalance String   @default("") // Cached on-chain balance (CSPR string)
+  status         String   @default("active")
+  isOnChain      Boolean  @default(false) // Whether this agent uses real on-chain keys
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   payments Payment[]
   reviews  Review[]
 }
 
 model Payment {
-  id           String   @id @default(cuid())
-  agentId      String
-  serviceId    String
-  amount       Float
-  status       String   @default("pending")
-  txHash       String   @default("")
-  requestId    String   @default("")
-  responseData String   @default("")
-  latencyMs    Int      @default(0)
-  createdAt    DateTime @default(now())
+  id              String   @id @default(cuid())
+  agentId         String
+  serviceId       String
+  amount          Float
+  status          String   @default("pending")
+  txHash          String   @default("")
+  requestId       String   @default("")
+  responseData    String   @default("")
+  latencyMs       Int      @default(0)
+  onChain         Boolean  @default(false) // Whether this was a real on-chain payment
+  deployHash      String   @default("") // Real deploy hash (different from mock txHash)
+  deployStatus    String   @default("") // pending/confirmed/failed
+  createdAt       DateTime @default(now())
 
   agent   Agent   @relation(fields: [agentId], references: [id])
   service Service @relation(fields: [serviceId], references: [id])

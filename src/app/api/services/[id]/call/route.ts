@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import crypto from 'crypto'
+import { cspRToMotes, formatMotesToCSPR, fromHex, getPublicKeyCasperHex, createAndSendTransfer, getAccountBalance } from '@/lib/casper/deploys'
+import { TESTNET, MOTES_PER_CSPR } from '@/lib/casper/constants'
 
 const MOCK_RESPONSES: Record<string, () => object> = {
   'AI Inference': () => ({
@@ -63,7 +65,7 @@ export async function POST(
   try {
     const { id } = await params
     const body = await req.json()
-    const { agentId } = body
+    const { agentId, onChain } = body
 
     if (!agentId) {
       return NextResponse.json(
@@ -83,8 +85,131 @@ export async function POST(
     }
 
     const price = service.pricePerCall
+    const requestId = `x402-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`
+    const latencyMs = service.latency + Math.floor(Math.random() * 50 - 25)
 
-    // Step 1: Check balance
+    // Get mock response data (always the same — service data is independent of payment method)
+    const responseGenerator = MOCK_RESPONSES[service.category] || MOCK_RESPONSES['Data API']
+    const responseData = JSON.stringify(responseGenerator())
+
+    // ═══════════════════════════════════════════════════════════
+    // ON-CHAIN MODE: Real CSPR transfer on Casper Testnet
+    // ═══════════════════════════════════════════════════════════
+    if (onChain && agent.isOnChain && agent.privateKey) {
+      // Verify on-chain balance
+      try {
+        const chainBalance = await getAccountBalance(getPublicKeyCasperHex(agent.publicKey))
+        const balanceMotes = BigInt(chainBalance.balanceMotes)
+        const amountMotes = cspRToMotes(price)
+        const gasMotes = 100_000_000n // 0.1 CSPR gas
+
+        if (balanceMotes < amountMotes + gasMotes) {
+          return NextResponse.json(
+            {
+              error: 'Insufficient on-chain balance',
+              required: formatMotesToCSPR(amountMotes + gasMotes) + ' CSPR',
+              available: chainBalance.balanceCSPR + ' CSPR',
+            },
+            { status: 402 }
+          )
+        }
+
+        // Execute real on-chain transfer
+        const transferResult = await createAndSendTransfer({
+          senderPrivateKey: fromHex(agent.privateKey),
+          senderPublicKeyHex: agent.publicKey,
+          recipientPublicKeyHex: service.providerAddr,
+          amountMotes,
+          paymentAmount: gasMotes,
+        })
+
+        // Refresh on-chain balance cache
+        const newBalance = await getAccountBalance(getPublicKeyCasperHex(agent.publicKey))
+
+        // Create payment record
+        const payment = await db.$transaction(async (tx) => {
+          await tx.agent.update({
+            where: { id: agentId },
+            data: {
+              balance: { decrement: price },
+              onChainBalance: newBalance.balanceCSPR,
+            },
+          })
+
+          const newPayment = await tx.payment.create({
+            data: {
+              agentId,
+              serviceId: id,
+              amount: price,
+              status: 'completed',
+              txHash: transferResult.deployHash,
+              requestId,
+              responseData,
+              latencyMs: latencyMs + 2000, // Add network latency estimate
+              onChain: true,
+              deployHash: transferResult.deployHash,
+              deployStatus: 'confirmed',
+            },
+          })
+
+          await tx.service.update({
+            where: { id },
+            data: {
+              totalCalls: { increment: 1 },
+              totalRevenue: { increment: price },
+            },
+          })
+
+          return newPayment
+        })
+
+        return NextResponse.json({
+          payment,
+          x402Flow: {
+            step1: {
+              status: 402,
+              message: 'Payment Required',
+              x402Version: '1.0',
+              service: service.name,
+              price,
+              currency: 'CSPR',
+              payTo: service.providerAddr,
+              onChain: true,
+            },
+            step2: {
+              status: 'on_chain_payment',
+              message: 'Transfer submitted to Casper Testnet',
+              txHash: transferResult.deployHash,
+              requestId,
+              amount: price,
+              confirmed: true,
+              explorerUrl: transferResult.explorerUrl,
+              blockExplorer: `${TESTNET.explorerUrl}${transferResult.deployHash.replace(/^0x/, '')}`,
+            },
+            step3: {
+              status: 200,
+              message: 'Service response delivered (on-chain verified)',
+              requestId,
+              latencyMs,
+              data: JSON.parse(responseData),
+            },
+          },
+          onChain: true,
+          transferResult,
+        })
+      } catch (chainError) {
+        console.error('On-chain payment error:', chainError)
+        return NextResponse.json(
+          { error: `On-chain payment failed: ${chainError instanceof Error ? chainError.message : 'Unknown error'}` },
+          { status: 500 }
+        )
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // DEMO MODE: Simulated payment (original behavior)
+    // ═══════════════════════════════════════════════════════════
+
     if (agent.balance < price) {
       return NextResponse.json(
         {
@@ -96,24 +221,14 @@ export async function POST(
       )
     }
 
-    // Generate x402 flow identifiers
     const txHash = `0x${crypto.randomBytes(32).toString('hex')}`
-    const requestId = `x402-${Date.now()}-${crypto.randomBytes(8).toString('hex')}`
-    const latencyMs = service.latency + Math.floor(Math.random() * 50 - 25)
 
-    // Get mock response data
-    const responseGenerator = MOCK_RESPONSES[service.category] || MOCK_RESPONSES['Data API']
-    const responseData = JSON.stringify(responseGenerator())
-
-    // Step 2: Deduct balance and create payment (in transaction)
     const payment = await db.$transaction(async (tx) => {
-      // Deduct from agent
-      const updatedAgent = await tx.agent.update({
+      await tx.agent.update({
         where: { id: agentId },
         data: { balance: { decrement: price } },
       })
 
-      // Create payment record
       const newPayment = await tx.payment.create({
         data: {
           agentId,
@@ -127,7 +242,6 @@ export async function POST(
         },
       })
 
-      // Update service stats
       await tx.service.update({
         where: { id },
         data: {
@@ -139,7 +253,6 @@ export async function POST(
       return newPayment
     })
 
-    // Step 3: Return x402 flow response
     return NextResponse.json({
       payment,
       x402Flow: {
@@ -148,13 +261,14 @@ export async function POST(
           message: 'Payment Required',
           x402Version: '1.0',
           service: service.name,
-          price: price,
+          price,
           currency: 'CSPR',
           payTo: service.providerAddr,
+          onChain: false,
         },
         step2: {
           status: 'payment_proof',
-          message: 'Payment verified on-chain',
+          message: 'Payment verified (demo mode)',
           txHash,
           requestId,
           amount: price,
@@ -168,6 +282,7 @@ export async function POST(
           data: JSON.parse(responseData),
         },
       },
+      onChain: false,
     })
   } catch (error) {
     console.error('Error executing x402 call:', error)
