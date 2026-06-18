@@ -6,3 +6,5 @@ node_modules/
 *.log
 db/
 tool-results/
+contracts/target/
+contracts/Cargo.lock

@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import crypto from 'crypto'
 import { cspRToMotes, formatMotesToCSPR, fromHex, getPublicKeyCasperHex, createAndSendTransfer, getAccountBalance } from '@/lib/casper/deploys'
 import { TESTNET, MOTES_PER_CSPR } from '@/lib/casper/constants'
+import { verifyPaymentBeforeDelivery } from '@/lib/casper/contracts'
 
 const MOCK_RESPONSES: Record<string, () => object> = {
   'AI Inference': () => ({
@@ -101,7 +102,7 @@ export async function POST(
         const chainBalance = await getAccountBalance(getPublicKeyCasperHex(agent.publicKey))
         const balanceMotes = BigInt(chainBalance.balanceMotes)
         const amountMotes = cspRToMotes(price)
-        const gasMotes = 100_000_000n // 0.1 CSPR gas
+        const gasMotes = BigInt(100_000_000) // 0.1 CSPR gas
 
         if (balanceMotes < amountMotes + gasMotes) {
           return NextResponse.json(
@@ -114,7 +115,7 @@ export async function POST(
           )
         }
 
-        // Execute real on-chain transfer
+        // Step 1: Execute real on-chain transfer
         const transferResult = await createAndSendTransfer({
           senderPrivateKey: fromHex(agent.privateKey),
           senderPublicKeyHex: agent.publicKey,
@@ -123,7 +124,27 @@ export async function POST(
           paymentAmount: gasMotes,
         })
 
-        // Refresh on-chain balance cache
+        // Step 2: x402 verification — confirm deploy on-chain before delivering data
+        const verification = await verifyPaymentBeforeDelivery(
+          transferResult.deployHash,
+          amountMotes,
+          service.providerAddr,
+          30000, // 30s timeout for verification
+        )
+
+        if (!verification.verified) {
+          return NextResponse.json(
+            {
+              error: 'Payment verification failed',
+              deployHash: transferResult.deployHash,
+              reason: verification.reason,
+              x402Step: 'verification_failed',
+            },
+            { status: 402 }
+          )
+        }
+
+        // Step 3: Refresh on-chain balance cache
         const newBalance = await getAccountBalance(getPublicKeyCasperHex(agent.publicKey))
 
         // Create payment record
@@ -149,6 +170,7 @@ export async function POST(
               onChain: true,
               deployHash: transferResult.deployHash,
               deployStatus: 'confirmed',
+              verified: true,
             },
           })
 
@@ -183,6 +205,7 @@ export async function POST(
               requestId,
               amount: price,
               confirmed: true,
+              verified: verification.verified,
               explorerUrl: transferResult.explorerUrl,
               blockExplorer: `${TESTNET.explorerUrl}${transferResult.deployHash.replace(/^0x/, '')}`,
             },
