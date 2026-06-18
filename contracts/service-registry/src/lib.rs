@@ -7,14 +7,14 @@
 
 extern crate alloc;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec, vec::Vec};
 use casper_contract::{
-    contract_api::runtime,
+    contract_api::{runtime, storage},
     unwrap_or_revert::UnwrapOrRevert,
 };
 use casper_types::{
     CLType, CLValue, EntryPoint, EntryPointAccess, EntryPointType, EntryPoints,
-    Group, Key, Parameter, ApiError,
+    Key, Parameter, ApiError,
 };
 
 const OWNER_KEY: &str = "owner";
@@ -25,24 +25,27 @@ const ERR_NOT_OWNER: u32 = 1;
 const ERR_NOT_FOUND: u32 = 2;
 const ERR_ALREADY_EXISTS: u32 = 3;
 
-fn get_owner() -> Key {
-    runtime::get_key(OWNER_KEY)
-        .unwrap_or_revert_with(ApiError::MissingKey)
+/// Helper: store a value under a named key via a new URef
+fn store_value<T: casper_types::CLTyped + casper_types::bytesrepr::ToBytes>(name: &str, value: T) {
+    let uref = storage::new_uref(value);
+    runtime::put_key(name, Key::from(uref));
 }
 
-fn ensure_owner() {
-    let owner = get_owner();
-    let caller = runtime::get_caller();
-    if owner != caller {
-        runtime::revert(ERR_NOT_OWNER);
-    }
+/// Helper: read a value from a named key (stored via URef)
+fn read_value<T: casper_types::CLTyped + casper_types::bytesrepr::FromBytes>(name: &str) -> T {
+    let key = runtime::get_key(name)
+        .unwrap_or_revert_with(ApiError::MissingKey);
+    let uref = key.into_uref().unwrap_or_revert_with(ApiError::UnexpectedKeyVariant);
+    storage::read(uref)
+        .unwrap_or_revert()
+        .unwrap_or_revert_with(ApiError::Read)
 }
 
 #[no_mangle]
 pub extern "C" fn init() {
     let owner = runtime::get_caller();
-    runtime::put_key(OWNER_KEY, owner);
-    runtime::put_key(SERVICE_COUNT_KEY, CLValue::from_t(0u64).unwrap_or_revert());
+    runtime::put_key(OWNER_KEY, Key::Account(owner));
+    store_value(SERVICE_COUNT_KEY, 0u64);
 }
 
 #[no_mangle]
@@ -50,7 +53,7 @@ pub extern "C" fn register_service() {
     let service_id: String = runtime::get_named_arg("service_id");
     let name: String = runtime::get_named_arg("name");
     let endpoint: String = runtime::get_named_arg("endpoint");
-    let price: u64 = runtime::get_named_arg("price"); // price in motes (CSPR * 10^9)
+    let price: u64 = runtime::get_named_arg("price");
     let provider: Key = runtime::get_named_arg("provider");
 
     let key = format!("{}_{}", SERVICE_PREFIX, service_id);
@@ -60,23 +63,18 @@ pub extern "C" fn register_service() {
         runtime::revert(ERR_ALREADY_EXISTS);
     }
 
-    runtime::put_key(&key, Key::from(format!("registered")));
-    runtime::put_key(&format!("{}_name", key), Key::from(name));
-    runtime::put_key(&format!("{}_endpoint", key), Key::from(endpoint));
-    runtime::put_key(&format!("{}_price", key), CLValue::from_t(price).unwrap_or_revert());
+    // Store a marker URef to indicate this service exists
+    store_value(&key, true);
+
+    store_value(&format!("{}_name", key), name);
+    store_value(&format!("{}_endpoint", key), endpoint);
+    store_value(&format!("{}_price", key), price);
     runtime::put_key(&format!("{}_provider", key), provider);
-    runtime::put_key(&format!("{}_active", key), Key::from(true as u8));
+    store_value(&format!("{}_active", key), true);
 
     // Increment count
-    let mut count: u64 = match runtime::get_key(SERVICE_COUNT_KEY) {
-        Some(k) => {
-            let cl: CLValue = k.into_cl_value().unwrap_or_revert();
-            cl.into_t().unwrap_or_revert()
-        }
-        None => 0,
-    };
-    count += 1;
-    runtime::put_key(SERVICE_COUNT_KEY, CLValue::from_t(count).unwrap_or_revert());
+    let count: u64 = read_value(SERVICE_COUNT_KEY);
+    store_value(SERVICE_COUNT_KEY, count + 1);
 }
 
 #[no_mangle]
@@ -89,10 +87,7 @@ pub extern "C" fn update_price() {
         runtime::revert(ERR_NOT_FOUND);
     }
 
-    runtime::put_key(
-        &format!("{}_price", key),
-        CLValue::from_t(new_price).unwrap_or_revert(),
-    );
+    store_value(&format!("{}_price", key), new_price);
 }
 
 #[no_mangle]
@@ -104,23 +99,13 @@ pub extern "C" fn get_service_price() {
         runtime::revert(ERR_NOT_FOUND);
     }
 
-    let price_key = runtime::get_key(&format!("{}_price", key))
-        .unwrap_or_revert_with(ApiError::MissingKey);
-    let price_cl: CLValue = price_key.into_cl_value().unwrap_or_revert();
-    let price: u64 = price_cl.into_t().unwrap_or_revert();
-
+    let price: u64 = read_value(&format!("{}_price", key));
     runtime::ret(CLValue::from_t(price).unwrap_or_revert());
 }
 
 #[no_mangle]
 pub extern "C" fn get_service_count() {
-    let count: u64 = match runtime::get_key(SERVICE_COUNT_KEY) {
-        Some(k) => {
-            let cl: CLValue = k.into_cl_value().unwrap_or_revert();
-            cl.into_t().unwrap_or_revert()
-        }
-        None => 0,
-    };
+    let count: u64 = read_value(SERVICE_COUNT_KEY);
     runtime::ret(CLValue::from_t(count).unwrap_or_revert());
 }
 
@@ -156,7 +141,7 @@ fn get_entry_points() -> EntryPoints {
     ];
     entry_points.add_entry_point(EntryPoint::new(
         "update_price",
-        update_params.clone(),
+        update_params,
         CLType::Unit,
         EntryPointAccess::Public,
         EntryPointType::Contract,
@@ -165,7 +150,7 @@ fn get_entry_points() -> EntryPoints {
     let get_price_params = vec![Parameter::new("service_id", CLType::String)];
     entry_points.add_entry_point(EntryPoint::new(
         "get_service_price",
-        get_price_params.clone(),
+        get_price_params,
         CLType::U64,
         EntryPointAccess::Public,
         EntryPointType::Contract,
@@ -184,9 +169,6 @@ fn get_entry_points() -> EntryPoints {
 
 #[no_mangle]
 pub extern "C" fn call() {
-    let entry_points = get_entry_points();
-    let default_group = Group::new("default", entry_points.iter().map(|ep| ep.name()).collect());
-    runtime::add_contract_package_group("default_group", default_group);
-
+    let _entry_points = get_entry_points();
     init();
 }

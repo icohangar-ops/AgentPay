@@ -238,29 +238,44 @@ export async function getDeployStatus(
 
 /**
  * Request CSPR from the testnet faucet.
+ * NOTE: Casper testnet faucet is now web-only at https://testnet.cspr.live/faucet
+ * This function provides the public key and faucet URL for the user to fund manually.
  */
-export async function requestFaucetFunds(publicKeyHex: HexString): Promise<{ success: boolean; message: string }> {
-  try {
-    const cleanKey = publicKeyHex.replace(/^0x/, '');
-    const response = await fetch(TESTNET.faucetUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        public_key: cleanKey.length === 66 ? cleanKey : `01${cleanKey}`,
-        amount: '10000000000', // 10 CSPR
-      }),
-    });
+export async function requestFaucetFunds(publicKeyHex: HexString): Promise<{ success: boolean; message: string; faucetUrl?: string; publicKey?: string }> {
+  const cleanKey = publicKeyHex.replace(/^0x/, '');
+  const casperKey = cleanKey.length === 66 ? cleanKey : `01${cleanKey}`;
 
-    if (response.ok) {
-      const data = await response.json();
-      return { success: true, message: data.message || 'Faucet transfer submitted' };
+  // Try the API endpoints (may work if Casper restores them)
+  const faucetEndpoints = [
+    'https://faucet.testnet.casper.network/api/v1/faucet',
+    'https://testnet-faucet.casper.network/api/v1/faucet',
+  ];
+
+  for (const url of faucetEndpoints) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ public_key: casperKey, amount: '10000000000' }),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        return { success: true, message: data.message || 'Faucet transfer submitted' };
+      }
+    } catch {
+      // Try next endpoint
     }
-
-    const text = await response.text();
-    return { success: false, message: `Faucet error: ${response.status} — ${text}` };
-  } catch (err) {
-    return { success: false, message: `Faucet request failed: ${err instanceof Error ? err.message : 'Unknown error'}` };
   }
+
+  // All API endpoints failed — return manual funding instructions
+  return {
+    success: false,
+    message: 'Faucet is web-only. Visit the faucet page to fund your account manually.',
+    faucetUrl: TESTNET.faucetUrl,
+    publicKey: casperKey,
+  };
 }
 
 /**

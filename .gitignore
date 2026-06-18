@@ -8,3 +8,5 @@ db/
 tool-results/
 contracts/target/
 contracts/Cargo.lock
+.deploy-key.json
+.deploy-results.json
