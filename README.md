@@ -143,6 +143,50 @@ Additional Casper testnet variables are optional — the app works in simulation
 - [ ] CSPR.trade MCP integration
 - [ ] Mainnet deployment
 
+## MAPS Integration
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Built%20with-MAPS%20%7C%20Multi-Agent%20Pipeline%20Skills-blue" alt="MAPS" />
+</p>
+
+AgentPay's AI agent marketplace is structured using the [MAPS framework](https://mojoaistudio.com/maps/) (Multi-Agent Pipeline Skills) for agent system development and service orchestration.
+
+### APS Layer (Per-Agent Pipeline) — Phase Mapping
+
+| MAPS Phase | AgentPay Component |
+|------------|-------------------|
+| **A0 Alignment** | x402 protocol alignment — HTTP 402 payment standard for agent-to-service interaction |
+| **A1 Define** | Agent brief — role, capabilities, Ed25519 keypair, payment flow |
+| **A2 Design** | Agent identity model — on-chain balance, service catalog, payment tracking |
+| **A3 Build** | Next.js App Router endpoints, Casper smart contracts (Escrow + Service Registry) |
+| **A4 Equip** | Ed25519 signing capability, casper-client deploy tool, CSPR wallet integration |
+| **A5 Evaluate** | Service review system, payment verification, on-chain deploy status checks |
+| **A6 Deploy** | Casper testnet deployment, Odra smart contract compilation |
+| **A7 Observe** | Payment Explorer — tx tracking, deploy verification, agent balance monitoring |
+| **A8 Improve** | Service rating feedback loop, roadmap for pricing optimization and agent performance |
+
+### Key MAPS Concepts Applied
+
+| Concept | AgentPay Implementation |
+|---------|------------------------|
+| **Agent Roster (M2)** | Agent registry with Ed25519 keypairs, on-chain identities, balance tracking |
+| **Capability Map (A4)** | x402 payment protocol, Casper deploy signing, service invocation tools |
+| **Evaluation (A5)** | On-chain deploy verification, service reviews, payment status tracking |
+| **Observation (A7)** | Payment Explorer dashboard, deploy status monitoring, on-chain balance reads |
+
+### Recommended MAPS Skills
+
+| Skill | Use Case |
+|-------|----------|
+| `/foundation` | M0 preflight — payment domain, Casper Network stack, x402 protocol |
+| `/shape` | Validate Single-Agent track (agent as consumer) vs Multi-Agent (marketplace) |
+| `/define-agent` | Brief new agent roles for expanded marketplace functionality |
+| `/build-agent++` | TDD-driven agent development for new agent capabilities |
+| `/equip-agent` | Capability mapping for payment, signing, and service invocation tools |
+| `/deploy-agent++` | GitHub Actions + Cloudflare deployment automation |
+
+---
+
 ## License
 
 MIT
