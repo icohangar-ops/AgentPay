@@ -10,3 +10,5 @@ authors = ["icohangar-ops"]
 [profile.release]
 opt-level = "z"
 lto = true
+[patch.crates-io]
+casper-contract = { path = "vendor_casper_contract" }

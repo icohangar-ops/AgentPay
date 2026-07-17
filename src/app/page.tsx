@@ -107,6 +107,24 @@ interface X402Flow {
   step3: { status: number; message: string; requestId: string; latencyMs: number; data: unknown };
 }
 
+interface TreasuryDecisionItem {
+  id: string;
+  agentId: string | null;
+  decision: string;
+  reasoning: string;
+  serviceId: string | null;
+  serviceName: string | null;
+  amountCSPR: number | null;
+  paymentId: string | null;
+  deployHash: string | null;
+  status: string;
+  llmModel: string;
+  cycleId: string;
+  createdAt: string;
+  agent?: { id: string; name: string; role: string } | null;
+  service?: { id: string; name: string; category: string; pricePerCall: number } | null;
+}
+
 // ── Constants ────────────────────────────────────────────────────────
 
 const CATEGORIES = ['All', 'AI Inference', 'DeFi Oracle', 'Data API', 'RWA Valuation', 'Identity'];
@@ -223,6 +241,26 @@ export default function AgentPayPage() {
   // Payment Explorer
   const [paymentFilter, setPaymentFilter] = useState('All');
 
+  // Treasury Agent
+  const [treasuryConfig, setTreasuryConfig] = useState<{
+    enabled: boolean; dryRun: boolean; llmModel: string;
+    intervalSeconds: number; minBalanceCSPR: number;
+    maxSpendPerCycleCSPR: number; allowedCategories: string;
+  } | null>(null);
+  const [treasuryStatus, setTreasuryStatus] = useState<{
+    enabled: boolean; dryRun: boolean; llmModel: string;
+    decisionsLast24h: number; executedLast24h: number;
+    dryRunLast24h: number; spentLast24hCSPR: number;
+    lastCycle: string | null;
+  } | null>(null);
+  const [treasuryDecisions, setTreasuryDecisions] = useState<TreasuryDecisionItem[]>([]);
+  const [treasuryRunning, setTreasuryRunning] = useState(false);
+  const [treasuryLastCycle, setTreasuryLastCycle] = useState<{
+    cycleId: string; decisionsMade: number; servicesCalled: number;
+    totalSpentCSPR: number; errors: string[];
+  } | null>(null);
+  const [treasurySaving, setTreasurySaving] = useState(false);
+
   const seededRef = useRef(false);
 
   // ── Chain Info Fetching ──────────────────────────────────────────
@@ -265,6 +303,84 @@ export default function AgentPayPage() {
     }
   }, [selectedAgentId]);
 
+  // ── Treasury Agent: fetch config, status, and recent decisions ───
+  const fetchTreasury = useCallback(async () => {
+    try {
+      const [cRes, sRes, dRes] = await Promise.all([
+        fetch('/api/treasury/config?XTransformPort=3000'),
+        fetch('/api/treasury/status?XTransformPort=3000'),
+        fetch('/api/treasury/decisions?XTransformPort=3000&limit=20'),
+      ]);
+      const [cData, sData, dData] = await Promise.all([
+        cRes.json(), sRes.json(), dRes.json(),
+      ]);
+      if (cData.config) setTreasuryConfig(cData.config);
+      setTreasuryStatus(sData);
+      setTreasuryDecisions(dData.decisions || []);
+    } catch (err) {
+      console.error('Treasury fetch error:', err);
+    }
+  }, []);
+
+  // ── Treasury Agent: run a decision cycle ──────────────────────────
+  const runTreasuryCycle = useCallback(async () => {
+    setTreasuryRunning(true);
+    setTreasuryLastCycle(null);
+    try {
+      const res = await fetch('/api/treasury/run?XTransformPort=3000', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      if (data.cycle) {
+        setTreasuryLastCycle({
+          cycleId: data.cycle.cycleId,
+          decisionsMade: data.cycle.decisionsMade,
+          servicesCalled: data.cycle.servicesCalled,
+          totalSpentCSPR: data.cycle.totalSpentCSPR,
+          errors: data.cycle.errors || [],
+        });
+      } else if (data.error) {
+        setTreasuryLastCycle({
+          cycleId: 'error',
+          decisionsMade: 0,
+          servicesCalled: 0,
+          totalSpentCSPR: 0,
+          errors: [data.error + (data.detail ? `: ${data.detail}` : '')],
+        });
+      }
+      await fetchTreasury();
+      await fetchAll();
+    } catch (err) {
+      setTreasuryLastCycle({
+        cycleId: 'error',
+        decisionsMade: 0,
+        servicesCalled: 0,
+        totalSpentCSPR: 0,
+        errors: [err instanceof Error ? err.message : String(err)],
+      });
+    } finally {
+      setTreasuryRunning(false);
+    }
+  }, [fetchTreasury, fetchAll]);
+
+  // ── Treasury Agent: update config ────────────────────────────────
+  const updateTreasuryConfig = useCallback(async (patch: Record<string, unknown>) => {
+    setTreasurySaving(true);
+    try {
+      const res = await fetch('/api/treasury/config?XTransformPort=3000', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json();
+      if (data.config) setTreasuryConfig(data.config);
+    } finally {
+      setTreasurySaving(false);
+    }
+  }, []);
+
   useEffect(() => {
     async function init() {
       setLoading(true);
@@ -278,10 +394,11 @@ export default function AgentPayPage() {
         }
       }
       await fetchAll();
+      await fetchTreasury();
       setLoading(false);
     }
     init();
-  }, [fetchAll]);
+  }, [fetchAll, fetchTreasury]);
 
   // ── Derived State ────────────────────────────────────────────────
   const selectedAgent = useMemo(
@@ -553,7 +670,7 @@ export default function AgentPayPage() {
       {/* ── Main Content ───────────────────────────────────────── */}
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6">
         <Tabs defaultValue="marketplace" className="w-full">
-          <TabsList className="w-full grid grid-cols-4 h-auto p-1 bg-card border border-border rounded-lg">
+          <TabsList className="w-full grid grid-cols-5 h-auto p-1 bg-card border border-border rounded-lg">
             <TabsTrigger value="marketplace" className="text-xs sm:text-sm py-2 sm:py-2.5 flex items-center gap-1.5 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-md">
               <LayoutGrid className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Marketplace</span>
@@ -562,6 +679,11 @@ export default function AgentPayPage() {
             <TabsTrigger value="dashboard" className="text-xs sm:text-sm py-2 sm:py-2.5 flex items-center gap-1.5 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-md">
               <PanelLeft className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Dashboard</span>
+              <span className="sm:hidden">Agent</span>
+            </TabsTrigger>
+            <TabsTrigger value="treasury" className="text-xs sm:text-sm py-2 sm:py-2.5 flex items-center gap-1.5 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-md">
+              <CircleDollarSign className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Treasury Agent</span>
               <span className="sm:hidden">Agent</span>
             </TabsTrigger>
             <TabsTrigger value="developer" className="text-xs sm:text-sm py-2 sm:py-2.5 flex items-center gap-1.5 data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-md">
@@ -1164,7 +1286,312 @@ export default function AgentPayPage() {
           </TabsContent>
 
           {/* ═══════════════════════════════════════════════════════════
-              TAB 3: DEVELOPER PORTAL
+              TAB 3: TREASURY AGENT (LLM-driven autonomous decision engine)
+          ═══════════════════════════════════════════════════════════ */}
+          <TabsContent value="treasury" className="mt-6 space-y-6">
+
+            {/* ── Hero / explainer card ── */}
+            <Card className="bg-gradient-to-br from-card via-card to-primary/5 border-primary/30">
+              <CardHeader>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <CardTitle className="flex items-center gap-2 text-xl">
+                      <CircleDollarSign className="h-5 w-5 text-primary" />
+                      Treasury Agent
+                    </CardTitle>
+                    <CardDescription className="mt-1 max-w-2xl">
+                      LLM-driven autonomous decision engine. Watches every agent's on-chain
+                      balance, asks <code className="text-xs px-1 py-0.5 rounded bg-muted">{treasuryConfig?.llmModel || 'glm-4.6'}</code> which
+                      service each agent should call, and executes the x402 payment flow on
+                      their behalf — real Ed25519-signed Casper deploys, no human in the loop.
+                    </CardDescription>
+                  </div>
+                  <Badge
+                    variant="outline"
+                    className={
+                      treasuryConfig?.enabled
+                        ? 'border-emerald-500/40 text-emerald-300 bg-emerald-500/5'
+                        : 'border-muted-foreground/30 text-muted-foreground'
+                    }
+                  >
+                    {treasuryConfig?.enabled ? 'Enabled' : 'Disabled'}
+                  </Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="rounded-md border border-border bg-card/50 p-3">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">24h Decisions</div>
+                    <div className="text-xl font-semibold mt-1">{treasuryStatus?.decisionsLast24h ?? 0}</div>
+                  </div>
+                  <div className="rounded-md border border-border bg-card/50 p-3">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">24h Executed</div>
+                    <div className="text-xl font-semibold mt-1 text-emerald-400">{treasuryStatus?.executedLast24h ?? 0}</div>
+                  </div>
+                  <div className="rounded-md border border-border bg-card/50 p-3">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">24h Dry-Run</div>
+                    <div className="text-xl font-semibold mt-1 text-amber-400">{treasuryStatus?.dryRunLast24h ?? 0}</div>
+                  </div>
+                  <div className="rounded-md border border-border bg-card/50 p-3">
+                    <div className="text-[10px] uppercase tracking-wider text-muted-foreground">24h Spent (CSPR)</div>
+                    <div className="text-xl font-semibold mt-1">{(treasuryStatus?.spentLast24hCSPR ?? 0).toFixed(4)}</div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3 pt-2">
+                  <Button
+                    onClick={runTreasuryCycle}
+                    disabled={treasuryRunning || !treasuryConfig?.enabled}
+                    className="bg-primary hover:bg-primary/90"
+                  >
+                    {treasuryRunning ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Running cycle…</>
+                    ) : (
+                      <><Zap className="h-4 w-4 mr-2" /> Run decision cycle now</>
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => fetchTreasury()}
+                    disabled={treasuryRunning}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" /> Refresh
+                  </Button>
+                  {treasuryConfig && (
+                    <Button
+                      variant="outline"
+                      onClick={() => updateTreasuryConfig({ dryRun: !treasuryConfig.dryRun })}
+                      disabled={treasurySaving}
+                    >
+                      {treasuryConfig.dryRun ? (
+                        <><Wifi className="h-4 w-4 mr-2" /> Switch to LIVE mode</>
+                      ) : (
+                        <><WifiOff className="h-4 w-4 mr-2" /> Switch to DRY-RUN</>
+                      )}
+                    </Button>
+                  )}
+                </div>
+
+                {/* Last cycle result banner */}
+                {treasuryLastCycle && (
+                  <div className={`rounded-md border p-3 text-sm ${
+                    treasuryLastCycle.cycleId === 'error'
+                      ? 'border-red-500/40 bg-red-500/5 text-red-300'
+                      : treasuryLastCycle.errors.length > 0
+                        ? 'border-amber-500/40 bg-amber-500/5 text-amber-300'
+                        : 'border-emerald-500/40 bg-emerald-500/5 text-emerald-300'
+                  }`}>
+                    {treasuryLastCycle.cycleId === 'error' ? (
+                      <div className="font-mono text-xs">
+                        Cycle failed: {treasuryLastCycle.errors[0]}
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <div className="font-semibold">
+                          Cycle {treasuryLastCycle.cycleId.slice(0, 8)} · {treasuryLastCycle.decisionsMade} decisions · {treasuryLastCycle.servicesCalled} executed · {treasuryLastCycle.totalSpentCSPR.toFixed(4)} CSPR spent
+                        </div>
+                        {treasuryLastCycle.errors.length > 0 && (
+                          <ul className="text-xs list-disc list-inside opacity-80">
+                            {treasuryLastCycle.errors.map((e, i) => (
+                              <li key={i}>{e}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* ── Config card ── */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-lg">Configuration</CardTitle>
+                <CardDescription>
+                  Tune the Treasury Agent's operating constraints. Changes apply on the next cycle.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {treasuryConfig ? (
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="text-xs uppercase tracking-wider text-muted-foreground">Enabled</label>
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          checked={treasuryConfig.enabled}
+                          onCheckedChange={(v) => updateTreasuryConfig({ enabled: v })}
+                          disabled={treasurySaving}
+                        />
+                        <span className="text-sm">{treasuryConfig.enabled ? 'On' : 'Off'}</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs uppercase tracking-wider text-muted-foreground">Dry-run mode</label>
+                      <div className="flex items-center gap-2">
+                        <Switch
+                          checked={treasuryConfig.dryRun}
+                          onCheckedChange={(v) => updateTreasuryConfig({ dryRun: v })}
+                          disabled={treasurySaving}
+                        />
+                        <span className="text-sm">{treasuryConfig.dryRun ? 'Log only (no on-chain calls)' : 'LIVE (real CSPR spends)'}</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs uppercase tracking-wider text-muted-foreground">Min balance reserve (CSPR)</label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={treasuryConfig.minBalanceCSPR}
+                        onChange={(e) => setTreasuryConfig({ ...treasuryConfig, minBalanceCSPR: parseFloat(e.target.value) || 0 })}
+                        onBlur={(e) => updateTreasuryConfig({ minBalanceCSPR: parseFloat(e.target.value) || 0 })}
+                        disabled={treasurySaving}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs uppercase tracking-wider text-muted-foreground">Max spend per cycle (CSPR)</label>
+                      <Input
+                        type="number"
+                        step="0.1"
+                        value={treasuryConfig.maxSpendPerCycleCSPR}
+                        onChange={(e) => setTreasuryConfig({ ...treasuryConfig, maxSpendPerCycleCSPR: parseFloat(e.target.value) || 0 })}
+                        onBlur={(e) => updateTreasuryConfig({ maxSpendPerCycleCSPR: parseFloat(e.target.value) || 0 })}
+                        disabled={treasurySaving}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs uppercase tracking-wider text-muted-foreground">LLM model</label>
+                      <Select
+                        value={treasuryConfig.llmModel}
+                        onValueChange={(v) => updateTreasuryConfig({ llmModel: v })}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="glm-4.6">glm-4.6</SelectItem>
+                          <SelectItem value="glm-4.5">glm-4.5</SelectItem>
+                          <SelectItem value="glm-4.5-air">glm-4.5-air</SelectItem>
+                          <SelectItem value="glm-4.5v">glm-4.5v (vision)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-xs uppercase tracking-wider text-muted-foreground">Allowed categories (comma-separated, empty = all)</label>
+                      <Input
+                        placeholder="e.g. DeFi Oracle,AI Inference"
+                        value={treasuryConfig.allowedCategories}
+                        onChange={(e) => setTreasuryConfig({ ...treasuryConfig, allowedCategories: e.target.value })}
+                        onBlur={(e) => updateTreasuryConfig({ allowedCategories: e.target.value })}
+                        disabled={treasurySaving}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">Loading configuration…</div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* ── Recent decisions card ── */}
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle className="text-lg">Recent Decisions</CardTitle>
+                    <CardDescription>
+                      Each row is one LLM-produced decision. Click a deploy hash to view it on testnet.cspr.live.
+                    </CardDescription>
+                  </div>
+                  <Badge variant="outline" className="text-[10px]">{treasuryDecisions.length} shown</Badge>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {treasuryDecisions.length === 0 ? (
+                  <div className="text-sm text-muted-foreground py-8 text-center">
+                    No decisions yet. Click <strong>Run decision cycle now</strong> to invoke the LLM.
+                  </div>
+                ) : (
+                  <ScrollArea className="h-[420px] rounded-md border border-border">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-xs">When</TableHead>
+                          <TableHead className="text-xs">Agent</TableHead>
+                          <TableHead className="text-xs">Decision</TableHead>
+                          <TableHead className="text-xs">Service</TableHead>
+                          <TableHead className="text-xs">CSPR</TableHead>
+                          <TableHead className="text-xs">Status</TableHead>
+                          <TableHead className="text-xs">Reasoning</TableHead>
+                          <TableHead className="text-xs">Deploy</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {treasuryDecisions.map((d) => {
+                          const isCall = d.decision === 'call_service';
+                          const statusColor = d.status === 'executed'
+                            ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                            : d.status === 'dry_run'
+                              ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                              : 'bg-muted-foreground/20 text-muted-foreground border-muted-foreground/30';
+                          return (
+                            <TableRow key={d.id}>
+                              <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                                {formatDate(d.createdAt)}
+                              </TableCell>
+                              <TableCell className="text-xs">
+                                <div className="font-medium">{d.agent?.name || '—'}</div>
+                                <div className="text-[10px] text-muted-foreground">{d.agent?.role || ''}</div>
+                              </TableCell>
+                              <TableCell className="text-xs">
+                                <Badge variant="outline" className={`text-[10px] ${
+                                  isCall
+                                    ? 'border-primary/30 text-primary'
+                                    : 'border-muted-foreground/30 text-muted-foreground'
+                                }`}>
+                                  {isCall ? 'CALL' : 'NO-ACTION'}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="text-xs">
+                                {d.serviceName || '—'}
+                              </TableCell>
+                              <TableCell className="text-xs font-mono">
+                                {d.amountCSPR != null ? d.amountCSPR.toFixed(4) : '—'}
+                              </TableCell>
+                              <TableCell className="text-xs">
+                                <Badge variant="outline" className={`text-[10px] ${statusColor}`}>
+                                  {d.status}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="text-xs max-w-[280px]">
+                                <div className="line-clamp-2 text-muted-foreground">{d.reasoning}</div>
+                              </TableCell>
+                              <TableCell className="text-xs">
+                                {d.deployHash ? (
+                                  <a
+                                    href={`https://testnet.cspr.live/deploy/${d.deployHash.replace(/^0x/, '')}`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 font-mono text-primary hover:underline"
+                                  >
+                                    {d.deployHash.slice(2, 10)}…
+                                    <ExternalLink className="h-3 w-3" />
+                                  </a>
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </ScrollArea>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          {/* ═══════════════════════════════════════════════════════════
+              TAB 4: DEVELOPER PORTAL
           ═══════════════════════════════════════════════════════════ */}
           <TabsContent value="developer" className="mt-6 space-y-6">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

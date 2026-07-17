@@ -30,6 +30,7 @@ model Service {
 
   payments Payment[]
   reviews  Review[]
+  treasuryDecisions TreasuryDecision[]
 }
 
 model Agent {
@@ -47,6 +48,7 @@ model Agent {
 
   payments Payment[]
   reviews  Review[]
+  treasuryDecisions TreasuryDecision[]
 }
 
 model Payment {
@@ -67,6 +69,7 @@ model Payment {
 
   agent   Agent   @relation(fields: [agentId], references: [id])
   service Service @relation(fields: [serviceId], references: [id])
+  treasuryDecisions TreasuryDecision[]
 }
 
 model Review {
@@ -80,4 +83,66 @@ model Review {
 
   service Service @relation(fields: [serviceId], references: [id])
   agent   Agent   @relation(fields: [agentId], references: [id])
+}
+
+// Allow Service to have TreasuryDecisions back-referenced (already added above)
+// Allow Agent to have TreasuryDecisions back-referenced (already added above)
+
+// ───────────────────────────────────────────────────────────────────
+// Treasury Agent: LLM-driven autonomous decision engine
+// Watches agent balances, decides when to call services on their behalf
+// ───────────────────────────────────────────────────────────────────
+
+model TreasuryConfig {
+  id                  String   @id @default("singleton")
+  enabled             Boolean  @default(true)
+  // Auto-trigger interval in seconds (0 = manual only)
+  intervalSeconds     Int      @default(300)
+  // Minimum on-chain CSPR balance to keep on each agent (don't drain below this)
+  minBalanceCSPR      Float    @default(0.5)
+  // Maximum spend per decision cycle (CSPR)
+  maxSpendPerCycleCSPR Float   @default(2.0)
+  // Comma-separated list of allowed service categories; empty = all
+  allowedCategories   String   @default("")
+  // LLM model to use (glm-4.6, glm-4.5, etc.)
+  llmModel            String   @default("glm-4.6")
+  // Whether to actually execute calls or just log decisions (dry-run mode)
+  dryRun              Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model TreasuryDecision {
+  id           String   @id @default(cuid())
+  agentId      String?   // The agent the decision is about
+  // "call_service" | "no_action" | "skip_low_balance" | "skip_disabled"
+  decision     String
+  // Human-readable LLM reasoning
+  reasoning    String
+  // When decision=call_service, the chosen service
+  serviceId    String?
+  serviceName  String?
+  // Amount in CSPR that was (or would be) spent
+  amountCSPR   Float?
+  // Payment ID if a payment was actually executed
+  paymentId    String?
+  // Deploy hash if an on-chain payment was executed
+  deployHash   String?
+  // "executed" | "dry_run" | "skipped"
+  status       String
+  // LLM model that produced this decision
+  llmModel     String
+  // Raw LLM response (JSON)
+  llmResponse  String
+  // Treasury cycle ID (multiple decisions share a cycle)
+  cycleId      String
+  createdAt    DateTime @default(now())
+
+  agent    Agent?   @relation(fields: [agentId], references: [id])
+  service  Service? @relation(fields: [serviceId], references: [id])
+  payment  Payment? @relation(fields: [paymentId], references: [id])
+
+  @@index([cycleId])
+  @@index([agentId])
+  @@index([createdAt])
 }

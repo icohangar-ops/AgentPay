@@ -9,3 +9,5 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 casper-contract = "3.0.0"
 casper-types = "3.0.0"
+[features]
+default = []

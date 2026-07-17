@@ -328,7 +328,7 @@ async function main() {
   console.log(`  Public Key: ${casperPubKey.slice(0, 20)}...${casperPubKey.slice(-10)}`);
 
   // Save keypair to file
-  const repoDir = join(__dirname, '..', 'agentpay-repo');
+  const repoDir = join(__dirname, '..');
   const keyFile = join(repoDir, '.deploy-key.json');
   const keyData = {
     publicKeyHex: pubKeyHex,
